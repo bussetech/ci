@@ -91,9 +91,10 @@ jobs:
       - name: Build site (Jekyll)
         env:
           JEKYLL_ENV: production
+          BUILD_COMMAND: ${{ inputs.build_command }}
         run: |
-          if [ -n "${{ inputs.build_command }}" ]; then
-            ${{ inputs.build_command }}
+          if [ -n "$BUILD_COMMAND" ]; then
+            bash -c "$BUILD_COMMAND"
           elif [ -f Gemfile ]; then
             bundle exec jekyll build --trace
           else
