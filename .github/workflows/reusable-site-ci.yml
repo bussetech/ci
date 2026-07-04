@@ -47,6 +47,15 @@ on:
         required: false
         type: string
         default: site
+      build_command:
+        description: >-
+          Command that produces _site (run from source_dir). Overrides the
+          default Jekyll build for sites with a pre-build step (e.g. the
+          portal generating its data files). Must be hermetic — this CI
+          passes it no secrets.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -83,7 +92,9 @@ jobs:
         env:
           JEKYLL_ENV: production
         run: |
-          if [ -f Gemfile ]; then
+          if [ -n "${{ inputs.build_command }}" ]; then
+            ${{ inputs.build_command }}
+          elif [ -f Gemfile ]; then
             bundle exec jekyll build --trace
           else
             gem install --no-document jekyll bundler
