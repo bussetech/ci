@@ -1,0 +1,15 @@
+---
+layout: home
+title: Studio Portal (fixture)
+description: A CI fixture standing in for the studio portal.
+---
+<section aria-label="Studio status">
+  <p>Studio status: {% include status-chip.html status="ok" label="operational" filled=true %}</p>
+</section>
+
+<section class="feed" aria-label="Recent activity">
+  <h2>Recent activity</h2>
+  {%- for item in site.data.feed -%}
+  {% include feed-item.html item=item %}
+  {%- endfor -%}
+</section>

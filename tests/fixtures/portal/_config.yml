@@ -1,0 +1,40 @@
+# Fixture portal site — a minimal studio site consumed by the chain test
+# (platform-e2e) and the UAT self-test. It stands in for the real portal
+# (prompt 07) so the studio's integration path — theme + feed + the smoke
+# suite's selectors — is exercised before www exists. It is NOT published.
+#
+# It consumes the shared theme exactly as a real site does: pinned remote_theme
+# + a `studio:` block. The feed is a fixture (see _data/feed.yml).
+title: Studio Portal (fixture)
+description: Fixture portal used by platform CI. Not a published site.
+lang: en
+url: "https://example.invalid"
+baseurl: ""
+
+remote_theme: bussetech/theme@v0.1.0
+plugins:
+  - jekyll-remote-theme
+
+studio:
+  logotype: "bussetech | software studio"
+  org: bussetech
+  domain: bussetech.com
+  visibility: public
+  is_portal: true            # portal: footer shows the logotype, not "a … project"
+  theme_color: "#FFFFFF"
+  analytics_beacon: ""        # no beacon in a fixture
+  footer_note: "CI fixture · not published"
+  nav:
+    - title: Home
+      url: /
+    - title: Projects
+      url: /projects/
+
+markdown: kramdown
+sass:
+  style: compressed
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor/

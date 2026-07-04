@@ -1,0 +1,264 @@
+# reusable-site-ci — the studio's standard CI for a Jekyll site repo.
+#
+# Build the site → check internal links → validate the built HTML →
+# (for private-published repos) prove the built output leaks no source →
+# upload the built site as an artifact.
+#
+# Call it from any site repo with a thin caller stub (docs/testing.md):
+#
+#   jobs:
+#     site:
+#       # Skips (green) outside the org so a detached repo degrades gracefully.
+#       if: ${{ github.repository_owner == 'bussetech' }}
+#       uses: bussetech/platform/.github/workflows/reusable-site-ci.yml@v1
+#       with:
+#         visibility: private-published   # public | private | private-published
+#
+# Self-contained on purpose: it checks out only the caller and carries its
+# own checkers inline, so it needs no token for the (private) control repo
+# and runs unchanged in or out of the org.
+name: reusable-site-ci
+
+on:
+  workflow_call:
+    inputs:
+      visibility:
+        description: "public | private | private-published (drives the source-leak check)"
+        required: false
+        type: string
+        default: public
+      source_dir:
+        description: "Path to the Jekyll site source within the repo"
+        required: false
+        type: string
+        default: "."
+      ruby_version:
+        description: "Ruby version for the Jekyll build"
+        required: false
+        type: string
+        default: "3.3"
+      check_external_links:
+        description: "Also check external (http) links — off by default: slow and flaky in CI"
+        required: false
+        type: boolean
+        default: false
+      artifact_name:
+        description: "Name for the uploaded built-site artifact"
+        required: false
+        type: string
+        default: site
+
+permissions:
+  contents: read
+
+env:
+  # lychee link checker — pinned by version AND sha256 (supply chain,
+  # docs/security.md), same discipline as gitleaks in secret-scan.yml.
+  LYCHEE_VERSION: "0.24.2"
+  LYCHEE_SHA256: "73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5"
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.source_dir }}
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4.2.2
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@d45b1a4e94b71acab930e56e79c6aa188764e7f9 # v1.316.0
+        with:
+          ruby-version: ${{ inputs.ruby_version }}
+          bundler-cache: true
+          working-directory: ${{ inputs.source_dir }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Build site (Jekyll)
+        env:
+          JEKYLL_ENV: production
+        run: |
+          if [ -f Gemfile ]; then
+            bundle exec jekyll build --trace
+          else
+            gem install --no-document jekyll bundler
+            jekyll build --trace
+          fi
+
+      - name: Install lychee (version + checksum pinned)
+        run: |
+          curl -sSL -o lychee.tgz \
+            "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-musl.tar.gz"
+          echo "${LYCHEE_SHA256}  lychee.tgz" | sha256sum -c -
+          tar -xzf lychee.tgz --strip-components=1 lychee-x86_64-unknown-linux-musl/lychee
+          chmod +x lychee
+
+      - name: Check internal links
+        run: |
+          # Offline by default: resolve links against the built _site only, so
+          # a broken relative link or dead fragment fails the build without
+          # depending on the network. --include-fragments checks #anchors too.
+          offline="--offline"
+          if [ "${{ inputs.check_external_links }}" = "true" ]; then offline=""; fi
+          ./lychee --no-progress --include-fragments $offline \
+            --root-dir "$(pwd)/_site" \
+            '_site/**/*.html'
+
+      - name: Validate built HTML (structure + rendered-template check)
+        run: |
+          python3 - <<'PY'
+          import sys, pathlib
+          from html.parser import HTMLParser
+
+          SITE = pathlib.Path("_site")
+          errors, warnings = [], []
+          # Liquid inside these elements is documented example text, not a bug.
+          RAW = {"code", "pre", "script", "style", "textarea"}
+
+          class V(HTMLParser):
+              def __init__(self, path):
+                  super().__init__(convert_charrefs=True)
+                  self.path = path
+                  self.ids = {}
+                  self.has_title = False
+                  self.in_title = False
+                  self.raw_depth = 0
+                  self.liquid = False
+              def handle_starttag(self, tag, attrs):
+                  d = dict(attrs)
+                  if tag in RAW:
+                      self.raw_depth += 1
+                  if tag == "title":
+                      self.in_title = True
+                  if "id" in d and d["id"]:
+                      self.ids[d["id"]] = self.ids.get(d["id"], 0) + 1
+                  for k in ("href", "src"):
+                      if k in d and d[k].strip() in ("", "#"):
+                          warnings.append(f"{self.path}: <{tag}> with empty {k}")
+              def handle_endtag(self, tag):
+                  if tag in RAW and self.raw_depth:
+                      self.raw_depth -= 1
+                  if tag == "title":
+                      self.in_title = False
+              def handle_data(self, data):
+                  if self.in_title and data.strip():
+                      self.has_title = True
+                  # Unrendered Liquid in a real text node is a template bug;
+                  # the same tokens inside <code>/<pre> are documented examples.
+                  if self.raw_depth == 0 and ("{%" in data or "{{" in data):
+                      self.liquid = True
+
+          html_files = sorted(SITE.rglob("*.html"))
+          if not html_files:
+              print("ERROR: no HTML files under _site/", file=sys.stderr)
+              sys.exit(1)
+
+          for f in html_files:
+              rel = f.relative_to(SITE)
+              text = f.read_text(encoding="utf-8", errors="replace")
+              p = V(rel)
+              try:
+                  p.feed(text); p.close()
+              except Exception as e:
+                  errors.append(f"{rel}: HTML parse error: {e}")
+                  continue
+              if p.liquid:
+                  errors.append(f"{rel}: unrendered Liquid in page text (template bug)")
+              dupes = [i for i, n in p.ids.items() if n > 1]
+              if dupes:
+                  errors.append(f"{rel}: duplicate id(s): {', '.join(sorted(dupes))}")
+              if not text.lstrip().lower().startswith("<!doctype"):
+                  warnings.append(f"{rel}: missing <!doctype html>")
+              if not p.has_title:
+                  warnings.append(f"{rel}: missing non-empty <title>")
+
+          for w in warnings:
+              print(f"::warning::html: {w}")
+          for e in errors:
+              print(f"::error::html: {e}")
+          print(f"Validated {len(html_files)} HTML file(s): "
+                f"{len(errors)} error(s), {len(warnings)} warning(s).")
+          sys.exit(1 if errors else 0)
+          PY
+
+      - name: Source-leak check (private-published only)
+        if: ${{ inputs.visibility == 'private-published' }}
+        env:
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          # ADR-0006: a private-published site shares outputs, not source. The
+          # built HTML/CSS/JS must carry no source maps and no links back into
+          # the private repo. Fail loudly if any leak is present.
+          python3 - <<'PY'
+          import os, re, sys, pathlib
+          SITE = pathlib.Path("_site")
+          repo = os.environ["REPO"]           # owner/name
+          owner = os.environ["OWNER"]
+          name = repo.split("/", 1)[1]
+          leaks = []
+          patterns = [
+              (re.compile(r"//# sourceMappingURL=", re.I), "inline source map ref"),
+              (re.compile(r"\.map(\?|\"|'|\s|$)"), "source-map file reference"),
+              (re.compile(re.escape(f"github.com/{repo}"), re.I), "link to the private repo"),
+              (re.compile(re.escape(f"raw.githubusercontent.com/{repo}"), re.I), "raw private-repo link"),
+              (re.compile(re.escape(f"github.com/{owner}/{name}/blob"), re.I), "private-repo blob link"),
+              (re.compile(re.escape(f"github.com/{owner}/{name}/edit"), re.I), "private-repo edit link"),
+          ]
+          scanned = 0
+          for f in SITE.rglob("*"):
+              if not f.is_file() or f.suffix.lower() not in (".html", ".css", ".js", ".json", ".xml", ".svg"):
+                  continue
+              scanned += 1
+              text = f.read_text(encoding="utf-8", errors="replace")
+              for rx, why in patterns:
+                  if rx.search(text):
+                      leaks.append(f"{f.relative_to(SITE)}: {why}")
+          # A .map file physically present in the output is itself a leak.
+          for f in SITE.rglob("*.map"):
+              leaks.append(f"{f.relative_to(SITE)}: source-map file present in output")
+          for l in leaks:
+              print(f"::error::leak: {l}")
+          print(f"Source-leak scan: {scanned} file(s) scanned, {len(leaks)} leak(s).")
+          if leaks:
+              print("private-published output must not expose source (ADR-0006).")
+          sys.exit(1 if leaks else 0)
+          PY
+
+      - name: Check discoverability outputs (if present)
+        run: |
+          # Feeds/sitemap ship via the shared theme; when a site emits them,
+          # they must be well-formed. Absent = the site opted out (no failure).
+          python3 - <<'PY'
+          import json, pathlib, sys
+          import xml.dom.minidom as minidom
+          site = pathlib.Path("_site")
+          bad = []
+          for name in ("feed.xml", "sitemap.xml"):
+              f = site / name
+              if f.exists():
+                  try: minidom.parse(str(f))
+                  except Exception as e: bad.append(f"{name}: {e}")
+          fj = site / "feed.json"
+          if fj.exists():
+              try: json.loads(fj.read_text())
+              except Exception as e: bad.append(f"feed.json: {e}")
+          for b in bad:
+              print(f"::error::discoverability: {b}")
+          print(f"Discoverability outputs checked: {len(bad)} malformed.")
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Upload built site
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.4.3
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ inputs.source_dir }}/_site
+          if-no-files-found: warn
+          retention-days: 7

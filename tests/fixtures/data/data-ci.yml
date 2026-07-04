@@ -1,0 +1,13 @@
+# data-ci manifest — maps data files to their schemas and declares the
+# referential-integrity hook. Consumed by reusable-data-ci (EPIC1-06).
+datasets:
+  - name: widgets
+    schema: schema/widget.schema.json
+    files: "data/widgets/*.json"
+  - name: owners
+    schema: schema/owners.schema.json   # CSV: each row validated as a row object
+    files: "data/owners.csv"
+
+# Cross-file check the schema can't express: every widget owner must exist in
+# the owners table. Runs only after all schema validation passes.
+integrity: scripts/check-integrity.sh

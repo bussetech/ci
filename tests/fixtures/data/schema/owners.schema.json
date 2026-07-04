@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "owner row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["owner_id", "name"],
+  "properties": {
+    "owner_id": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 }
+  }
+}

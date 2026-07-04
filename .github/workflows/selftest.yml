@@ -1,0 +1,26 @@
+# selftest — proves this repo's reusable workflows on every change, against
+# fixtures it owns. Same-repo (local ref), so it validates the workflows as
+# they are on the branch before consumers pin a new tag.
+name: selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    uses: ./.github/workflows/reusable-site-ci.yml
+    with:
+      source_dir: tests/fixtures/portal
+      visibility: public
+      artifact_name: portal-fixture-site
+
+  data:
+    uses: ./.github/workflows/reusable-data-ci.yml
+    with:
+      data_dir: tests/fixtures/data

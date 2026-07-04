@@ -1,0 +1,162 @@
+# reusable-data-ci — schema + referential-integrity gate for text data stores.
+#
+# The studio's main defense against agent-written garbage data: no
+# gnome-generated (or human) commit merges until every JSON/YAML/CSV file
+# validates against its JSON Schema and the repo's own integrity checks pass.
+#
+# Call it from any data-bearing repo (docs/testing.md):
+#
+#   jobs:
+#     data:
+#       if: ${{ github.repository_owner == 'bussetech' }}
+#       uses: bussetech/platform/.github/workflows/reusable-data-ci.yml@v1
+#
+# Mapping data files to schemas, in priority order:
+#   1. a `data-ci.yml` manifest (repo root, .github/, or data/) — explicit:
+#        datasets:
+#          - name: parcels
+#            schema: schema/parcels.schema.json
+#            files: "data/parcels/*.json"     # glob or list; json|yaml|csv
+#        integrity: scripts/check-integrity.sh  # optional, run after schema pass
+#   2. convention fallback — schema/<name>.schema.json validates
+#      data/<name>.{json,yml,yaml,csv} and data/<name>/*.{...}
+#
+# CSV rows validate individually as string-valued objects (DictReader); write
+# row schemas with "type": "string" + pattern/format, or pre-convert types.
+# Self-contained: checks out only the caller, so it runs in or out of the org.
+name: reusable-data-ci
+
+on:
+  workflow_call:
+    inputs:
+      data_dir:
+        description: "Path to the repo subtree to validate (default: whole repo)"
+        required: false
+        type: string
+        default: "."
+
+permissions:
+  contents: read
+
+jobs:
+  data:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.data_dir }}
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install validators (pinned)
+        run: python -m pip install --quiet 'pyyaml>=6,<7' 'jsonschema>=4,<5'
+
+      - name: Validate data against schemas
+        id: validate
+        run: |
+          python3 - <<'PY'
+          import sys, os, json, glob, pathlib, csv
+          import yaml
+          from jsonschema import Draft202012Validator
+
+          ROOT = pathlib.Path(".")
+          manifest, manifest_path = None, None
+          for cand in ("data-ci.yml", ".github/data-ci.yml", "data/data-ci.yml"):
+              p = ROOT / cand
+              if p.exists():
+                  manifest = yaml.safe_load(p.read_text()) or {}
+                  manifest_path = cand
+                  break
+
+          datasets, integrity = [], None
+          if manifest is not None:
+              print(f"data-ci manifest: {manifest_path}")
+              datasets = manifest.get("datasets", []) or []
+              integrity = manifest.get("integrity")
+          else:
+              schemadir = ROOT / "schema"
+              if schemadir.is_dir():
+                  for sf in sorted(schemadir.glob("*.schema.json")):
+                      name = sf.name[:-len(".schema.json")]
+                      files = []
+                      for ext in ("json", "yml", "yaml", "csv"):
+                          files += glob.glob(f"data/{name}.{ext}")
+                          files += glob.glob(f"data/{name}/*.{ext}")
+                      if files:
+                          datasets.append({"name": name, "schema": str(sf), "files": sorted(files)})
+                  if datasets:
+                      print("using convention mapping (schema/<name>.schema.json ↔ data/<name>.*)")
+
+          # Surface the integrity hook to the next step regardless of outcome.
+          gh_out = os.environ.get("GITHUB_OUTPUT")
+          if gh_out and integrity:
+              with open(gh_out, "a") as fh:
+                  fh.write(f"integrity={integrity}\n")
+
+          if not datasets:
+              print("No datasets to validate (no data-ci.yml and no schema/ matches). OK.")
+              sys.exit(0)
+
+          def iter_docs(path):
+              p = pathlib.Path(path)
+              ext = p.suffix.lower()
+              if ext in (".yml", ".yaml"):
+                  return [(path, yaml.safe_load(p.read_text()))]
+              if ext == ".json":
+                  return [(path, json.loads(p.read_text()))]
+              if ext == ".csv":
+                  rows = []
+                  with p.open(newline="") as fh:
+                      for i, row in enumerate(csv.DictReader(fh), start=2):
+                          rows.append((f"{path}:row{i}", dict(row)))
+                  return rows
+              return [(path, p.read_text())]
+
+          errors = 0
+          for ds in datasets:
+              schema = json.loads(pathlib.Path(ds["schema"]).read_text())
+              validator = Draft202012Validator(schema)
+              files = ds["files"]
+              if isinstance(files, str):
+                  files = sorted(glob.glob(files, recursive=True))
+              if not files:
+                  print(f"::warning::data: dataset '{ds.get('name')}' matched no files ({ds.get('files')})")
+                  continue
+              for f in files:
+                  try:
+                      docs = iter_docs(f)
+                  except Exception as e:
+                      print(f"::error::data: {f}: could not parse: {e}")
+                      errors += 1
+                      continue
+                  file_errs = 0
+                  for label, inst in docs:
+                      for e in sorted(validator.iter_errors(inst), key=lambda e: list(e.path)):
+                          loc = "/".join(str(x) for x in e.path) or "(root)"
+                          print(f"::error::data: {label}: at {loc}: {e.message}")
+                          errors += 1
+                          file_errs += 1
+                  flag = "OK" if file_errs == 0 else f"{file_errs} error(s)"
+                  print(f"  {f}  →  {ds['schema']}  [{flag}]")
+
+          if errors:
+              print(f"\nData validation FAILED: {errors} schema violation(s).")
+              sys.exit(1)
+          print("\nData validation: all datasets conform to schema.")
+          PY
+
+      - name: Referential integrity (repo-provided hook)
+        if: ${{ steps.validate.outputs.integrity != '' }}
+        run: |
+          hook='${{ steps.validate.outputs.integrity }}'
+          echo "Running referential-integrity hook: $hook"
+          if [ ! -f "$hook" ]; then
+            echo "::error::data: integrity hook '$hook' declared but not found"
+            exit 1
+          fi
+          bash "$hook"

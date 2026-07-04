@@ -1,0 +1,6 @@
+# Fixture portal build deps. jekyll-remote-theme pulls the shared theme by its
+# pinned tag; github-pages-compatible Jekyll otherwise.
+source "https://rubygems.org"
+
+gem "jekyll", "~> 4.3"
+gem "jekyll-remote-theme", "~> 0.4"

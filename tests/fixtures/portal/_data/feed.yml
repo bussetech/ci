@@ -1,0 +1,19 @@
+# Fixture feed — stands in for the aggregated project feed the real portal
+# will render. A portal aggregates updates FROM project sites, so item URLs are
+# external (project subdomains); the site's own nav links stay internal and are
+# link-checked. Shape matches the theme's feed-item component.
+- title: "DNS steward reconciled the zone"
+  url: "https://platform.bussetech.com/updates/dns-reconciled/"
+  date: "2026-07-01"
+  source: platform
+  summary: "Apex and www now resolve to GitHub Pages, DNS-only."
+- title: "Shared theme v0.1.0 released"
+  url: "https://theme.bussetech.com/updates/theme-v0-1-0/"
+  date: "2026-07-04"
+  source: theme
+  summary: "The studio's design system, consumed as a pinned remote_theme."
+- title: "Data CI now guards every data store"
+  url: "https://platform.bussetech.com/updates/data-ci/"
+  date: "2026-07-04"
+  source: platform
+  summary: "Schema + referential-integrity checks on every JSON/YAML/CSV commit."
