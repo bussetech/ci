@@ -56,6 +56,16 @@ on:
         required: false
         type: string
         default: ""
+      style_lint:
+        description: >-
+          External-prose style lint (platform docs/gtm/style.md).
+          "strict": hard fails block; warnings block on files matching the
+          repo's .style-lint.json "strict" globs. "report": annotate only.
+          "off": skip. www, case studies, and the whitepaper run strict
+          per the doctrine; everything else defaults to report.
+        required: false
+        type: string
+        default: report
 
 permissions:
   contents: read
@@ -241,6 +251,26 @@ jobs:
               print("private-published output must not expose source (ADR-0006).")
           sys.exit(1 if leaks else 0)
           PY
+
+      - name: Fetch style-lint (this repo's v1 tag)
+        # Lints *source* prose, not built HTML, so findings carry real
+        # file:line. Skipped inside bussetech/ci itself — the selftest runs
+        # the branch's own script so changes prove out before v1 moves.
+        if: ${{ inputs.style_lint != 'off' && github.repository != 'bussetech/ci' }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4.2.2
+        with:
+          repository: bussetech/ci
+          ref: v1
+          path: .style-lint-tools
+
+      - name: Style lint (docs/gtm/style.md)
+        if: ${{ inputs.style_lint != 'off' }}
+        env:
+          MODE: ${{ inputs.style_lint }}
+        run: |
+          LINT="$GITHUB_WORKSPACE/.style-lint-tools/scripts/style_lint.py"
+          [ -f "$LINT" ] || LINT="$GITHUB_WORKSPACE/scripts/style_lint.py"
+          python3 "$LINT" --mode "$MODE" .
 
       - name: Check discoverability outputs (if present)
         run: |
