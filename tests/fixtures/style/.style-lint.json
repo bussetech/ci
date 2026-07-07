@@ -1,0 +1,9 @@
+{
+  "strict": ["bad.md", "acked.md"],
+  "ack": [
+    {"path": "acked.md", "rule": "blacklist-word", "word": "journey",
+     "reason": "Desk lifecycle vocabulary (style.md §2.5)"},
+    {"path": "acked.md", "rule": "receipt-count",
+     "reason": "the page is about the run log; fixture for ack machinery"}
+  ]
+}

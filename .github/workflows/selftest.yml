@@ -24,3 +24,10 @@ jobs:
     uses: ./.github/workflows/reusable-data-ci.yml
     with:
       data_dir: tests/fixtures/data
+
+  style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4.2.2
+      - name: style-lint self-test (every rule fires; clean prose passes)
+        run: python3 tests/test_style_lint.py
