@@ -106,14 +106,15 @@ def blank(text, start, end, keep_quoted=False):
     optionally, quoted string contents — copy riding in Liquid params)."""
     seg = text[start:end]
     if keep_quoted:
+        # Keep param copy (title="...", lede='...'); apostrophes are legal
+        # inside double-quoted values, so try double quotes first.
         out = []
-        for m in re.finditer(r"[\"']([^\"'\n]*)[\"']|(.)", seg, re.S):
-            if m.group(1) is not None:
-                q = m.group(0)
-                out.append(" " + m.group(1) + " ")
-                assert len(out[-1]) == len(q)
+        for m in re.finditer(r"\"([^\"\n]*)\"|'([^'\n]*)'|(.)", seg, re.S):
+            if m.group(1) is not None or m.group(2) is not None:
+                inner = m.group(1) if m.group(1) is not None else m.group(2)
+                out.append(" " + inner + " ")
             else:
-                out.append(m.group(2) if m.group(2) == "\n" else " ")
+                out.append(m.group(3) if m.group(3) == "\n" else " ")
         seg = "".join(out)
     else:
         seg = re.sub(r"[^\n]", " ", seg)
@@ -152,6 +153,7 @@ def clean(raw, is_html):
     blank_all(r"`[^`\n]+`", flags=0)                     # inline code
     blank_all(r"\]\([^)\n]+\)", flags=0)                 # md link targets
     blank_all(r"^\[[^\]\n]+\]:.*$", flags=re.M)          # reference targets
+    blank_all(r"^(\s*[-*+]\s+)\[[xX ]\]", flags=re.M)    # checkbox markers
     return text, fm_end
 
 
@@ -159,13 +161,22 @@ def line_of(text, pos):
     return text.count("\n", 0, pos) + 1
 
 
-def paragraphs(text):
-    """Yield (start_offset, paragraph_text) for blank-line-separated blocks."""
+def paragraphs(text, fm_end=0):
+    """Yield (start_offset, paragraph_text) for blank-line-separated blocks.
+    Front matter (offset < fm_end) yields per LINE: YAML has no blank lines,
+    and each value (a description, an FAQ answer) is its own prose unit."""
     pos = 0
-    for block in re.split(r"\n\s*\n", text):
-        idx = text.index(block, pos) if block else pos
+    for ln in text[:fm_end].splitlines(keepends=True):
+        if ln.strip():
+            yield pos, ln
+        pos += len(ln)
+    body = text[fm_end:]
+    pos = 0
+    # A line that is just ">" separates blockquote paragraphs.
+    for block in re.split(r"\n(?:\s*>\s*)?\n", body):
+        idx = body.index(block, pos) if block else pos
         if block.strip():
-            yield idx, block
+            yield fm_end + idx, block
         pos = idx + len(block)
 
 
@@ -224,7 +235,7 @@ def lint_file(path, rel):
         f.append(Finding(rel, line_of(text, m.start()), "filler-idiom",
                          f'"{m.group(0)}"'))
 
-    for off, par in paragraphs(text):
+    for off, par in paragraphs(text, fm_end):
         n_em = par.count("—") + len(re.findall(r"\s–\s", par))
         if n_em > 1:
             f.append(Finding(rel, line_of(text, off), "emdash-paragraph",
@@ -251,11 +262,16 @@ def lint_file(path, rel):
     if not is_html:
         fm_last_line = line_of(text, fm_end - 1) if fm_end else 0
         colon_lines = []
+        prev_blank = True
         for i, ln in enumerate(text.splitlines(), 1):
             if i <= fm_last_line:  # front matter: keys, not prose layout
+                prev_blank = True
                 continue
-            if RX_COLON_OPEN.match(ln):
+            # A "Term:" opener is a paragraph-initial tell; a wrapped line
+            # that happens to start with "Word:" mid-paragraph is not.
+            if prev_blank and RX_COLON_OPEN.match(ln):
                 colon_lines.append(i)
+            prev_blank = not ln.strip()
             lm = re.match(r"\s*(?:[-*+]|\d+\.)\s+(.*)", ln)
             body = lm.group(1) if lm else ln
             pos = body.find("**")
@@ -338,9 +354,14 @@ def main():
             return 2
     findings, table = [], []
     for fp in files:
-        try:
-            rel = str(fp.relative_to(root))
-        except ValueError:
+        rp = fp.resolve()
+        for base in (Path.cwd(), root.resolve()):
+            try:
+                rel = str(rp.relative_to(base))
+                break
+            except ValueError:
+                continue
+        else:
             rel = str(fp)
         if globmatch(rel, DEFAULT_EXCLUDE + cfg["exclude"]):
             continue

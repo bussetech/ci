@@ -20,5 +20,7 @@ The pipeline is fast, and the checks are strict, so the **whole thing hums**
 along nicely without anyone watching it too closely.
 
 Speed: we ship weekly.
+
 Safety: we test everything.
+
 Honesty: we publish the logs.
