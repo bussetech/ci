@@ -1,0 +1,116 @@
+# reusable-app-ci — the studio shell for `saas` (type-(b)) repos.
+#
+# Named in ADR-0021 §2, bounded in ADR-0023 §1, built at the first `saas`
+# founding (eaap, EPIC4-07). It carries NO app logic — unit/integration CI
+# is project-owned. What the studio asserts about every runtime app repo:
+#
+#   secret-scan   gitleaks over full history (runtime secrets live in
+#                 provider-native stores; nothing secret-shaped belongs
+#                 in the repo, ever)
+#   pin-lint      third-party Actions pinned to full commit SHAs
+#                 (studio supply-chain law; bussetech/* @v1 refs exempt —
+#                 moving major tags per home repo are the convention)
+#   deploy-lint   deploy workflows are DELIBERATE and RECEIPTED:
+#                 workflow_dispatch-triggered (no deploy-on-push),
+#                 journal a receipt, and never deploy GitHub Pages
+#                 (a saas app's PROD is a provider runtime — ADR-0023)
+#
+# Call it from a saas repo (docs/testing.md):
+#
+#   jobs:
+#     app-shell:
+#       if: ${{ github.repository_owner == 'bussetech' }}
+#       uses: bussetech/ci/.github/workflows/reusable-app-ci.yml@v1
+#
+# Self-contained: checks out only the caller; runs in or out of the org.
+name: reusable-app-ci
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4.2.2
+        with:
+          fetch-depth: 0 # full history — old leaks are still leaks
+      - name: Install gitleaks (version + checksum pinned)
+        run: |
+          curl -sSL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz gitleaks
+      - name: Scan full history
+        run: ./gitleaks detect --source . --no-banner --redact --verbose
+
+  pin-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4.2.2
+      - name: Third-party Actions pinned to full SHAs
+        run: |
+          python3 - <<'EOF'
+          import re, sys, pathlib
+          bad = []
+          for wf in pathlib.Path('.github/workflows').glob('*.y*ml'):
+              for n, line in enumerate(wf.read_text().splitlines(), 1):
+                  m = re.search(r'uses:\s*([^\s#]+)', line)
+                  if not m:
+                      continue
+                  ref = m.group(1)
+                  if ref.startswith('./'):
+                      continue  # local
+                  if ref.startswith('bussetech/'):
+                      continue  # studio reusable workflows pin @v1 by convention
+                  if not re.search(r'@[0-9a-f]{40}$', ref):
+                      bad.append(f'{wf}:{n}: {ref}')
+          if bad:
+              print('third-party Actions must be pinned to full commit SHAs:')
+              print('\n'.join(bad))
+              sys.exit(1)
+          print('pin-lint: OK')
+          EOF
+
+  deploy-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4.2.2
+      - name: Deploys are deliberate, receipted, and never Pages
+        run: |
+          python3 - <<'EOF'
+          import sys, pathlib, re
+          try:
+              import yaml  # pyyaml is preinstalled on GitHub runners
+          except ImportError:
+              yaml = None
+          problems = []
+          for wf in pathlib.Path('.github/workflows').glob('*.y*ml'):
+              text = wf.read_text()
+              is_deploy = 'wrangler deploy' in text or re.search(r'^name:\s*deploy', text, re.M) or 'deploy' in wf.stem
+              # Pages deploys are type-(a) machinery; a saas repo must not carry one
+              if re.search(r'actions/deploy-pages|peaceiris/actions-gh-pages', text):
+                  problems.append(f'{wf}: GitHub Pages deploy in a saas repo (PROD is a provider runtime, ADR-0023)')
+              if not is_deploy:
+                  continue
+              triggers = {}
+              if yaml is not None:
+                  doc = yaml.safe_load(text) or {}
+                  triggers = doc.get('on') or doc.get(True) or {}
+              if isinstance(triggers, dict) and ('push' in triggers or 'pull_request' in triggers):
+                  problems.append(f'{wf}: deploy workflow triggers on push/PR — deploys are deliberate (workflow_dispatch)')
+              if 'receipt' not in text:
+                  problems.append(f'{wf}: deploy workflow has no receipt step — every deploy is journaled')
+          if problems:
+              print('deploy-lint failures:')
+              print('\n'.join(problems))
+              sys.exit(1)
+          print('deploy-lint: OK')
+          EOF
